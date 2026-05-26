@@ -4,6 +4,8 @@ import { rankTorrents, toNumber } from "../server/scoring.js";
 const rankedCache = new Map();
 const downloadCache = new Map();
 const CACHE_TTL_MS = 2 * 60 * 1000;
+const SESSION_COOKIE = "c411_session";
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 
 function envValue(env, name, fallback = "") {
   return env[name] || fallback;
@@ -25,6 +27,94 @@ function filtersFrom(url, env) {
 
 function torrentId(torrent) {
   return torrent.infohash || torrent.guid || btoa(unescape(encodeURIComponent(torrent.title))).slice(0, 48);
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function base64UrlToBytes(value) {
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function hmac(message, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return bytesToBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message))));
+}
+
+async function createSession(env) {
+  const expires = Math.floor(Date.now() / 1000) + SESSION_MAX_AGE;
+  const payload = `${expires}`;
+  return `${payload}.${await hmac(payload, envValue(env, "SESSION_SECRET"))}`;
+}
+
+async function isSessionValid(request, env) {
+  const secret = envValue(env, "SESSION_SECRET");
+  if (!secret) return false;
+
+  const cookie = request.headers.get("cookie") || "";
+  const match = cookie.match(new RegExp(`(?:^|; )${SESSION_COOKIE}=([^;]+)`));
+  if (!match) return false;
+
+  const [expires, signature] = decodeURIComponent(match[1]).split(".");
+  if (!expires || !signature || Number(expires) < Math.floor(Date.now() / 1000)) return false;
+
+  const expected = await hmac(expires, secret);
+  if (expected.length !== signature.length) return false;
+
+  const left = base64UrlToBytes(expected);
+  const right = base64UrlToBytes(signature);
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function isRssTokenValid(url, env) {
+  const token = envValue(env, "RSS_TOKEN");
+  return Boolean(token) && url.searchParams.get("token") === token;
+}
+
+function loginPage(error = "") {
+  return new Response(`<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>C411 Seed Ranker - Login</title>
+    <style>
+      :root { color: #edf3ff; background: #07110f; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: linear-gradient(180deg, #092025, #081016); }
+      main { width: min(420px, calc(100vw - 32px)); border: 1px solid rgba(154, 192, 205, .22); border-radius: 8px; padding: 24px; background: rgba(14, 27, 39, .92); }
+      h1 { margin: 0 0 18px; font-size: 28px; }
+      label { display: grid; gap: 8px; color: #a9bac8; font-size: 14px; }
+      input { width: 100%; box-sizing: border-box; border: 1px solid rgba(157, 192, 209, .22); border-radius: 6px; padding: 12px; color: #fff; background: #0a1720; font: inherit; }
+      button { width: 100%; margin-top: 16px; border: 0; border-radius: 8px; padding: 12px 18px; color: #062018; background: #4de1b0; font: inherit; cursor: pointer; }
+      p { min-height: 20px; margin: 12px 0 0; color: #ffb4a8; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>C411 Seed Ranker</h1>
+      <form method="post" action="/login">
+        <label>Mot de passe
+          <input name="password" type="password" autocomplete="current-password" autofocus>
+        </label>
+        <button type="submit">Entrer</button>
+      </form>
+      <p>${escapeXml(error)}</p>
+    </main>
+  </body>
+</html>`, {
+    headers: { "content-type": "text/html; charset=utf-8" }
+  });
 }
 
 function publicTorrent(torrent) {
@@ -109,10 +199,11 @@ function escapeXml(value) {
 function buildRss(torrents, requestUrl) {
   const url = new URL(requestUrl);
   const origin = url.origin;
+  const token = url.searchParams.get("token") || "";
   const items = torrents.map((torrent) => {
     const id = torrentId(torrent);
     downloadCache.set(id, torrent.link);
-    const downloadUrl = `${origin}/download?id=${encodeURIComponent(id)}`;
+    const downloadUrl = `${origin}/download?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`;
 
     return `
     <item>
@@ -161,19 +252,51 @@ async function handleRequest(request, env) {
   const url = new URL(request.url);
 
   try {
+    if (url.pathname === "/login" && request.method === "POST") {
+      const form = await request.formData();
+      if (form.get("password") !== envValue(env, "ADMIN_PASSWORD")) {
+        return loginPage("Mot de passe incorrect.");
+      }
+
+      const session = await createSession(env);
+      return new Response(null, {
+        status: 303,
+        headers: {
+          location: "/",
+          "set-cookie": `${SESSION_COOKIE}=${encodeURIComponent(session)}; Max-Age=${SESSION_MAX_AGE}; Path=/; HttpOnly; Secure; SameSite=Lax`
+        }
+      });
+    }
+
+    if (url.pathname === "/logout") {
+      return new Response(null, {
+        status: 303,
+        headers: {
+          location: "/",
+          "set-cookie": `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`
+        }
+      });
+    }
+
+    const sessionValid = await isSessionValid(request, env);
+    const rssTokenValid = isRssTokenValid(url, env);
+
     if (url.pathname === "/api/health") {
+      if (!sessionValid) return json({ error: "Authentification requise" }, 401);
       return json({
         ok: true,
         hasApiKey: Boolean(envValue(env, "C411_API_KEY")),
-        rssUrl: `${url.origin}/rss`
+        rssUrl: `${url.origin}/rss?token=${encodeURIComponent(envValue(env, "RSS_TOKEN"))}`
       });
     }
 
     if (url.pathname === "/api/ranked") {
+      if (!sessionValid) return json({ error: "Authentification requise" }, 401);
       return json(await ranked(url, env, { publicView: true }));
     }
 
     if (url.pathname === "/rss") {
+      if (!rssTokenValid) return new Response("RSS token invalide", { status: 401 });
       const data = await ranked(url, env);
       return new Response(buildRss(data.torrents, url.toString()), {
         headers: { "content-type": "application/rss+xml; charset=utf-8" }
@@ -181,6 +304,7 @@ async function handleRequest(request, env) {
     }
 
     if (url.pathname === "/download") {
+      if (!sessionValid && !rssTokenValid) return new Response("Authentification requise", { status: 401 });
       const link = await findDownloadLink(url.searchParams.get("id"), env);
       if (!link) {
         return new Response("Torrent introuvable. Rafraichis la liste puis reessaie.", {
@@ -190,6 +314,8 @@ async function handleRequest(request, env) {
       }
       return Response.redirect(link, 302);
     }
+
+    if (!sessionValid) return loginPage();
 
     return env.ASSETS.fetch(request);
   } catch (error) {

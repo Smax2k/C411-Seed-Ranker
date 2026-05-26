@@ -64,6 +64,8 @@ Tu peux aussi copier l'URL complete affichee dans l'interface, qui inclut les fi
 
 Dans qBittorrent, ajoute le flux RSS affiche par l'application. Pour l'auto-telechargement, cree une regle RSS large et laisse l'application filtrer le flux avec ses criteres.
 
+Sur Cloudflare, le flux RSS contient un `token` secret dans l'URL. Ce token est necessaire parce que qBittorrent ne sait pas utiliser le cookie de session de l'interface.
+
 ## Scoring
 
 Le score favorise :
@@ -82,4 +84,7 @@ Les filtres par defaut sont modifiables dans `.env` ou dans l'interface. `MIN_SI
 
 - `.env` contient les secrets locaux et n'est pas versionne.
 - `.env.example` contient uniquement des valeurs d'exemple.
-- Le flux RSS est servi uniquement en local sur `127.0.0.1`.
+- Sur Cloudflare, l'interface est protegee par un mot de passe cote Worker.
+- Le cookie de session est `HttpOnly`, `Secure` et `SameSite=Lax`.
+- Le RSS et les URLs de telechargement qBittorrent sont proteges par un token separe.
+- Configure les secrets avec Wrangler : `C411_API_KEY`, `ADMIN_PASSWORD`, `SESSION_SECRET` et `RSS_TOKEN`.
