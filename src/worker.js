@@ -367,6 +367,11 @@ function loginPage(error = "") {
       label { display: grid; gap: 8px; color: #a9bac8; font-size: 14px; }
       input { width: 100%; box-sizing: border-box; border: 1px solid rgba(157, 192, 209, .22); border-radius: 6px; padding: 12px; color: #fff; background: #0a1720; font: inherit; }
       button { width: 100%; margin-top: 16px; border: 0; border-radius: 8px; padding: 12px 18px; color: #062018; background: #4de1b0; font: inherit; cursor: pointer; }
+      .apiHelp { margin: 0 0 18px; border: 1px solid rgba(77, 225, 176, .26); border-radius: 8px; padding: 14px; background: rgba(77, 225, 176, .08); }
+      .apiHelp strong { display: block; margin-bottom: 6px; color: #f7fbff; font-size: 15px; }
+      .apiHelp p { margin: 0 0 12px; color: #b7c8d5; font-size: 13px; line-height: 1.45; }
+      .apiHelp a { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; border-radius: 8px; padding: 11px 14px; color: #062018; background: #4de1b0; font-size: 14px; font-weight: 700; text-decoration: none; }
+      .apiHelp a svg { width: 17px; height: 17px; }
       .error { min-height: 20px; margin: 12px 0 0; color: #ffb4a8; font-size: 13px; }
       .hint { margin: 18px 0 0; color: #8fb7c4; font-size: 13px; line-height: 1.45; }
       @media (max-width: 820px) {
@@ -406,6 +411,14 @@ function loginPage(error = "") {
       </section>
       <aside>
         <h2>Connexion</h2>
+        <div class="apiHelp">
+          <strong>Besoin d'une clé API ?</strong>
+          <p>Connecte-toi sur C411, clique sur "Créer une clé", copie-la, puis colle-la ici.</p>
+          <a href="https://c411.org/user/integrations" target="_blank" rel="noreferrer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg>
+            Ouvrir la page des clés API
+          </a>
+        </div>
         <form method="post" action="/login">
           <label>Clé API C411
             <input name="apiKey" type="password" autocomplete="current-password" autofocus>

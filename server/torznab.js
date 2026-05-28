@@ -28,6 +28,72 @@ function extractTorznabAttr(itemXml, attrName) {
   return "";
 }
 
+const ADULT_CATEGORY_IDS = new Set(["6000", "6010", "6050", "6060", "6070", "6080"]);
+const DEFAULT_SAFE_CATEGORY_IDS = [
+  "1000",
+  "1030",
+  "1040",
+  "1080",
+  "1090",
+  "2000",
+  "2010",
+  "2030",
+  "2050",
+  "2060",
+  "2070",
+  "2080",
+  "2090",
+  "3000",
+  "3010",
+  "3030",
+  "3050",
+  "4000",
+  "4030",
+  "4040",
+  "4050",
+  "4060",
+  "4070",
+  "5000",
+  "5060",
+  "5070",
+  "5080",
+  "7000",
+  "7010",
+  "7020",
+  "7030",
+  "8010"
+];
+const ADULT_TITLE_PATTERNS = [
+  /\bxxx\b/i,
+  /\bporn(?:hub|megaload|mega|load)?\b/i,
+  /\bhentai(?:ed)?\b/i,
+  /\bonlyfans\b/i,
+  /\bxvideos/i,
+  /\bsexart\b/i,
+  /\bsinfulxxx\b/i,
+  /\bhardx\b/i,
+  /\bnubiles\b/i,
+  /\bsiterip\b/i
+];
+
+export function safeCategories(categories = "") {
+  const values = String(categories)
+    .split(",")
+    .map((category) => category.trim())
+    .filter(Boolean)
+    .filter((category) => !ADULT_CATEGORY_IDS.has(category));
+
+  return (values.length ? values : DEFAULT_SAFE_CATEGORY_IDS).join(",");
+}
+
+export function isAdultTorrent(torrent) {
+  const category = String(torrent.category || "").trim();
+  if (ADULT_CATEGORY_IDS.has(category)) return true;
+
+  const title = String(torrent.title || "");
+  return ADULT_TITLE_PATTERNS.some((pattern) => pattern.test(title));
+}
+
 export function parseTorznab(xml) {
   const itemMatches = [...xml.matchAll(/<item\b[\s\S]*?<\/item>/gi)];
   return itemMatches.map((match) => {
@@ -60,7 +126,8 @@ export async function fetchTorznab({ baseUrl, apiKey, query = "", categories = "
   url.searchParams.set("offset", String(offset));
 
   if (query) url.searchParams.set("q", query);
-  if (categories) url.searchParams.set("cat", categories);
+  const safeCategoryFilter = safeCategories(categories);
+  if (safeCategoryFilter) url.searchParams.set("cat", safeCategoryFilter);
 
   const response = await fetch(url, {
     headers: {
@@ -92,6 +159,7 @@ export async function fetchTorznabPages({ baseUrl, apiKey, query = "", categorie
 
     let added = 0;
     for (const torrent of pageTorrents) {
+      if (isAdultTorrent(torrent)) continue;
       const key = torrent.guid || torrent.link || torrent.title;
       if (!key || seen.has(key)) continue;
       seen.add(key);

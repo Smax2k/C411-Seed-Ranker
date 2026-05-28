@@ -21,8 +21,10 @@ function sizeGb(bytes) {
 
 function ageLabel(date) {
   if (!date) return "-";
-  const hours = Math.max((Date.now() - new Date(date).getTime()) / 36e5, 0);
-  if (hours < 48) return `${Math.round(hours)} h`;
+  const minutes = Math.max(Math.floor((Date.now() - new Date(date).getTime()) / 6e4), 0);
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 48) return `${hours} h ${remainingMinutes.toString().padStart(2, "0")} min`;
   return `${Math.round(hours / 24)} j`;
 }
 
