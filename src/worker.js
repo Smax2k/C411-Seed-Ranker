@@ -6,6 +6,9 @@ const CACHE_TTL_MS = 2 * 60 * 1000;
 const DEFAULT_D1_CACHE_TTL_SECONDS = 15 * 60;
 const SESSION_COOKIE = "c411_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 8;
+const loginAttempts = new Map();
 
 function envValue(env, name, fallback = "") {
   return env[name] || fallback;
@@ -37,8 +40,9 @@ function buildC411DownloadLink(baseUrl, apiKey, id) {
   return url.toString();
 }
 
-function scopeKey(filters) {
+function scopeKey(filters, userId = "") {
   return JSON.stringify({
+    userId,
     query: filters.query || "",
     categories: filters.categories || ""
   });
@@ -114,12 +118,13 @@ async function writeCachedTorrents(env, key, filters, torrents, targetScan) {
   for (const torrent of torrents) {
     statements.push(env.DB.prepare(`
       INSERT OR REPLACE INTO torrent_cache (
-        scope_key, torrent_key, title, link, guid, pub_date, category, seeders, leechers, grabs,
+        scope_key, torrent_key, user_id, title, link, guid, pub_date, category, seeders, leechers, grabs,
         infohash, upload_volume_factor, download_volume_factor, size_bytes, raw_json, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       key,
       torrentId(torrent),
+      filters.userId || "",
       torrent.title || "",
       "",
       torrent.guid || "",
@@ -250,6 +255,55 @@ async function apiKeyFromRssToken(token, env) {
     source: "user",
     userId: row.id
   };
+}
+
+function clientIp(request) {
+  return request.headers.get("CF-Connecting-IP")
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "unknown";
+}
+
+async function isRateLimited(key, env, limit = LOGIN_RATE_LIMIT_MAX_ATTEMPTS, windowMs = LOGIN_RATE_LIMIT_WINDOW_MS) {
+  if (env.RATE_LIMIT && typeof env.RATE_LIMIT.get === "function") {
+    const now = Date.now();
+    const existing = await env.RATE_LIMIT.get(key, { type: "json" });
+    if (!existing || now > existing.resetAt) {
+      await env.RATE_LIMIT.put(
+        key,
+        JSON.stringify({ count: 1, resetAt: now + windowMs }),
+        { expirationTtl: Math.ceil(windowMs / 1000) }
+      );
+      return false;
+    }
+
+    const count = toNumber(existing.count) + 1;
+    await env.RATE_LIMIT.put(
+      key,
+      JSON.stringify({ count, resetAt: existing.resetAt }),
+      { expirationTtl: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)) }
+    );
+    return count > limit;
+  }
+
+  const now = Date.now();
+  const current = loginAttempts.get(key);
+  if (!current || now > current.resetAt) {
+    loginAttempts.set(key, { count: 1, resetAt: now + windowMs });
+    return false;
+  }
+
+  current.count += 1;
+  return current.count > limit;
+}
+
+function rateLimitResponse() {
+  return new Response("Trop de tentatives. Réessaie dans quelques minutes.", {
+    status: 429,
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "retry-after": String(Math.ceil(LOGIN_RATE_LIMIT_WINDOW_MS / 1000))
+    }
+  });
 }
 
 async function createSession(env, token) {
@@ -386,13 +440,14 @@ function publicTorrent(torrent) {
 
 async function ranked(url, env, options = {}) {
   const apiKey = options.apiKey;
+  const userId = options.userId || "";
   const baseUrl = envValue(env, "C411_API_URL", "https://c411.org/api");
   if (!apiKey || apiKey === "remplace_moi") {
     throw new Error("Clé API C411 manquante pour cette session");
   }
 
   const filters = filtersFrom(url, env);
-  const cacheKey = JSON.stringify(filters);
+  const cacheKey = JSON.stringify({ userId, filters });
   const cached = rankedCache.get(cacheKey);
   if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) {
     return options.publicView
@@ -405,7 +460,7 @@ async function ranked(url, env, options = {}) {
     toNumber(envValue(env, "SCAN_RESULTS"), 800)
   );
   const effectiveTargetScan = Math.min(targetScan, 2000);
-  const key = scopeKey(filters);
+  const key = scopeKey(filters, userId);
   const state = await readScanState(env, key);
   const cacheIsFresh = state && Date.now() - state.scanned_at <= d1CacheTtlMs(env);
   let torrents = [];
@@ -426,7 +481,7 @@ async function ranked(url, env, options = {}) {
         target: effectiveTargetScan,
         pageSize: 100
       });
-      await writeCachedTorrents(env, key, filters, torrents, effectiveTargetScan);
+      await writeCachedTorrents(env, key, { ...filters, userId }, torrents, effectiveTargetScan);
     } catch (error) {
       const cachedTorrents = await readCachedTorrents(env, key);
       if (!cachedTorrents.length) throw error;
@@ -508,15 +563,16 @@ function buildRss(torrents, requestUrl) {
 </rss>`;
 }
 
-async function findDownloadLinkForApiKey(id, env, apiKey) {
+async function findDownloadLinkForApiKey(id, env, apiKey, userId = "") {
   if (!id || !apiKey) return "";
 
   const baseUrl = envValue(env, "C411_API_URL", "https://c411.org/api");
   if (hasD1(env)) {
     const row = await env.DB.prepare(
-      "SELECT torrent_key FROM torrent_cache WHERE torrent_key = ? LIMIT 1"
-    ).bind(id).first();
+      "SELECT torrent_key FROM torrent_cache WHERE torrent_key = ? AND user_id = ? LIMIT 1"
+    ).bind(id, userId).first();
     if (row?.torrent_key) return buildC411DownloadLink(baseUrl, apiKey, id);
+    return "";
   }
 
   const torrents = await fetchTorznabPages({
@@ -539,6 +595,7 @@ async function handleRequest(request, env) {
 
   try {
     if (url.pathname === "/login" && request.method === "POST") {
+      if (await isRateLimited(`login:${clientIp(request)}`, env)) return rateLimitResponse();
       const form = await request.formData();
       const apiKey = String(form.get("apiKey") || "").trim();
       if (apiKey.length < 16) return loginPage("Clé API C411 invalide.");
@@ -580,6 +637,9 @@ async function handleRequest(request, env) {
 
     if (url.pathname === "/api/users" && request.method === "POST") {
       if (!sessionValid) return json({ error: "Authentification requise" }, 401);
+      if (await isRateLimited(`api-users:${clientIp(request)}:${sessionAuth?.userId || "unknown"}`, env, 12)) {
+        return json({ error: "Trop de créations de tokens. Réessaie dans quelques minutes." }, 429);
+      }
       const contentType = request.headers.get("content-type") || "";
       const payload = contentType.includes("application/json")
         ? await request.json()
@@ -595,12 +655,12 @@ async function handleRequest(request, env) {
     if (url.pathname === "/api/ranked") {
       if (!sessionValid) return json({ error: "Authentification requise" }, 401);
       if (!sessionAuth?.apiKey) return json({ error: "Clé API C411 introuvable pour cette session" }, 401);
-      return json(await ranked(url, env, { publicView: true, apiKey: sessionAuth.apiKey }));
+      return json(await ranked(url, env, { publicView: true, apiKey: sessionAuth.apiKey, userId: sessionAuth.userId }));
     }
 
     if (url.pathname === "/rss") {
       if (!rssAuth) return new Response("RSS token invalide", { status: 401 });
-      const data = await ranked(url, env, { apiKey: rssAuth.apiKey });
+      const data = await ranked(url, env, { apiKey: rssAuth.apiKey, userId: rssAuth.userId });
       return new Response(buildRss(data.torrents, url.toString()), {
         headers: { "content-type": "application/rss+xml; charset=utf-8" }
       });
@@ -609,15 +669,21 @@ async function handleRequest(request, env) {
     if (url.pathname === "/download") {
       if (!sessionValid && !rssTokenValid) return new Response("Authentification requise", { status: 401 });
       const link = rssAuth
-        ? await findDownloadLinkForApiKey(url.searchParams.get("id"), env, rssAuth.apiKey)
-        : await findDownloadLinkForApiKey(url.searchParams.get("id"), env, sessionAuth?.apiKey);
+        ? await findDownloadLinkForApiKey(url.searchParams.get("id"), env, rssAuth.apiKey, rssAuth.userId)
+        : await findDownloadLinkForApiKey(url.searchParams.get("id"), env, sessionAuth?.apiKey, sessionAuth?.userId);
       if (!link) {
         return new Response("Torrent introuvable. Rafraichis la liste puis reessaie.", {
           status: 404,
           headers: { "content-type": "text/plain; charset=utf-8" }
         });
       }
-      return Response.redirect(link, 302);
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: link,
+          "referrer-policy": "no-referrer"
+        }
+      });
     }
 
     if (!sessionValid) return loginPage();
