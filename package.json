@@ -8,8 +8,8 @@
     "server": "node server/index.js",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "deploy": "node server/local-deploy.js",
-    "deploy:cloudflare": "npm run build && npx wrangler deploy"
+    "deploy": "npx wrangler deploy",
+    "deploy:cloudflare": "npm run build && npm run deploy"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

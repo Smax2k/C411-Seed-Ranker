@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Check, Download } from "lucide-react";
+import { Check, Copy, Download, GitFork, Info, LogOut, X } from "lucide-react";
 import "./styles.css";
 
 const defaultFilters = {
@@ -32,6 +32,8 @@ function App() {
   const [data, setData] = useState({ torrents: [], filters: defaultFilters });
   const [status, setStatus] = useState("Chargement...");
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [copyStatus, setCopyStatus] = useState("");
+  const [helpOpen, setHelpOpen] = useState(false);
   const [downloaded, setDownloaded] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("downloadedTorrents") || "{}");
@@ -133,11 +135,45 @@ function App() {
     setFilters((current) => ({ ...current, [key]: value }));
   }
 
+  async function copyRssUrl() {
+    if (!rssUrl) return;
+    await navigator.clipboard.writeText(rssUrl);
+    setCopyStatus("Copié");
+    setTimeout(() => setCopyStatus(""), 1600);
+  }
+
   return (
     <main className="shell">
+      {helpOpen ? (
+        <div className="modalBackdrop" role="presentation" onClick={() => setHelpOpen(false)}>
+          <section className="helpModal" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={(event) => event.stopPropagation()}>
+            <div className="helpModalHead">
+              <h2 id="help-title">Comment ca marche</h2>
+              <button className="iconButton" type="button" onClick={() => setHelpOpen(false)} aria-label="Fermer">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="helpGrid">
+              <article>
+                <strong>1. Scanner</strong>
+                <p>L'application lit les nouveaux torrents C411 et garde une liste exploitable pour tes filtres.</p>
+              </article>
+              <article>
+                <strong>2. Classer</strong>
+                <p>Le score favorise les torrents récents, peu seedés, avec une demande visible et une taille utile pour générer de l'upload.</p>
+              </article>
+              <article>
+                <strong>3. Télécharger</strong>
+                <p>Le flux RSS utilise ta clé API de session pour fournir à qBittorrent tes propres liens de téléchargement.</p>
+              </article>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <section className="topbar">
         <div>
-          <p className="eyebrow">RSS local pour contenus legaux ou autorises</p>
+          <p className="eyebrow">RSS pour contenus légaux ou autorisés</p>
           <h1>C411 Seed Ranker</h1>
         </div>
         <div className="topActions">
@@ -148,8 +184,27 @@ function App() {
             </span>
             <span>Auto-refresh</span>
           </label>
-          <button onClick={load}>Rafraichir</button>
+          <button onClick={load}>Rafraîchir</button>
+          <a className="logoutButton" href="https://github.com/Smax2k/C411-Seed-Ranker" target="_blank" rel="noreferrer" title="Voir le projet sur GitHub">
+            <GitFork size={17} />
+            GitHub
+          </a>
+          <a className="logoutButton" href="/logout" title="Se deconnecter">
+            <LogOut size={17} />
+            Déconnexion
+          </a>
         </div>
+      </section>
+
+      <section className="introBanner">
+        <div>
+          <strong>Repère les torrents avec le meilleur potentiel d'upload.</strong>
+          <span>Connecte ta clé API C411, ajuste les filtres, copie le RSS dans qBittorrent.</span>
+        </div>
+        <button className="secondaryButton" type="button" onClick={() => setHelpOpen(true)}>
+          <Info size={17} />
+          Détails
+        </button>
       </section>
 
       <section className="panel controls">
@@ -158,7 +213,7 @@ function App() {
           <input value={filters.q} onChange={(event) => updateFilter("q", event.target.value)} placeholder="Optionnel" />
         </label>
         <label>
-          Categories
+          Catégories
           <input value={filters.cat} onChange={(event) => updateFilter("cat", event.target.value)} placeholder="ex: 5000,5030" />
         </label>
         <label>
@@ -178,7 +233,7 @@ function App() {
           <input type="number" min="0.1" step="0.1" value={filters.maxSizeGb} onChange={(event) => updateFilter("maxSizeGb", event.target.value)} />
         </label>
         <label>
-          Age max heures
+          Âge max heures
           <input type="number" min="1" step="1" value={filters.maxAgeHours} onChange={(event) => updateFilter("maxAgeHours", event.target.value)} />
         </label>
         <label>
@@ -186,20 +241,24 @@ function App() {
           <input type="number" min="0" step="10" value={filters.minScore} onChange={(event) => updateFilter("minScore", event.target.value)} />
         </label>
         <label>
-          Resultats
+          Résultats
           <input type="number" min="1" max="200" value={filters.maxResults} onChange={(event) => updateFilter("maxResults", event.target.value)} />
         </label>
       </section>
 
-      <section className="rssBox">
-        <span>URL RSS qBittorrent</span>
+      <section className="rssBox compactRss">
+        <span>RSS qBittorrent</span>
         <code>{rssUrl || "Demarre le serveur pour obtenir l'URL"}</code>
+        <button className="secondaryButton" type="button" onClick={copyRssUrl} disabled={!rssUrl}>
+          <Copy size={17} />
+          {copyStatus || "Copier"}
+        </button>
       </section>
 
       <section className="tableWrap">
         <div className="tableHead">
           <strong>{status}</strong>
-          <span>{health?.hasApiKey ? "Cle API detectee" : "Cle API manquante"}</span>
+          <span>{health?.hasApiKey ? "Clé API détectée" : "Clé API manquante"}</span>
         </div>
         <table>
           <thead>
@@ -210,7 +269,7 @@ function App() {
               <th>Leech</th>
               <th>Ratio</th>
               <th>Taille</th>
-              <th>Age</th>
+              <th>Âge</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -225,16 +284,16 @@ function App() {
                 <td>{sizeGb(torrent.sizeBytes)}</td>
                 <td>{ageLabel(torrent.pubDate)}</td>
                 <td className="actions">
-                  <a className="download" href={downloadUrl(torrent.id)} target="_blank" rel="noreferrer" onClick={() => handleDownload(torrent)} title="Telecharger le torrent">
+                  <a className="download" href={downloadUrl(torrent.id)} target="_blank" rel="noreferrer" onClick={() => handleDownload(torrent)} title="Télécharger le torrent">
                     <Download size={16} />
-                    Telecharger
+                    Télécharger
                   </a>
                   <button
                     className={`checkButton ${downloaded[torrentKey(torrent)] ? "active" : ""}`}
                     type="button"
                     onClick={() => setDownloadedState(torrentKey(torrent), !downloaded[torrentKey(torrent)])}
-                    title={downloaded[torrentKey(torrent)] ? "Marquer comme non telecharge" : "Marquer comme telecharge"}
-                    aria-label={downloaded[torrentKey(torrent)] ? "Marquer comme non telecharge" : "Marquer comme telecharge"}
+                    title={downloaded[torrentKey(torrent)] ? "Marquer comme non téléchargé" : "Marquer comme téléchargé"}
+                    aria-label={downloaded[torrentKey(torrent)] ? "Marquer comme non téléchargé" : "Marquer comme téléchargé"}
                   >
                     <Check size={17} />
                   </button>

@@ -1,123 +1,70 @@
 # C411 Seed Ranker
 
-Application Vite + React qui classe des resultats issus d'une API Torznab compatible, puis expose un flux RSS filtrable pour qBittorrent.
+C411 Seed Ranker est une application Cloudflare Workers qui aide à améliorer son ratio plus vite avec qBittorrent.
 
-Usage prevu : contenus legaux, libres ou explicitement autorises.
+Le principe : tu te connectes avec ta clé API C411, l'application classe les torrents selon leur potentiel d'upload, puis elle génère un flux RSS que qBittorrent peut surveiller et télécharger automatiquement.
 
-## Ce Que Fait L'App
+Usage prévu : contenus légaux, libres ou explicitement autorisés.
 
-- classe les torrents par potentiel de seed
-- expose un flux RSS compatible qBittorrent
-- filtre par seeders max, leechers min, taille min/max, age max et score min
-- rafraichit automatiquement la liste toutes les 5 minutes
-- permet le telechargement manuel depuis l'interface
-- marque localement les torrents deja traites
-- peut tourner en local ou sur Cloudflare Workers
+## Objectif
 
-## Deux Modes D'Utilisation
+- repérer les torrents récents avec une demande visible
+- éviter les torrents déjà trop saturés en seeders
+- fournir un flux RSS filtrable pour qBittorrent
+- automatiser l'ajout de torrents intéressants
+- augmenter son ratio plus rapidement grâce à des choix de seed plus efficaces
 
-### Mode Local
+## Fonctionnement
 
-Le mode local est le plus simple. Il lance :
+1. Tu ouvres l'application Cloudflare.
+2. Tu te connectes avec ta clé API C411.
+3. L'application crée un token RSS propre à ta session.
+4. Tu ajustes les filtres : seeders max, leechers min, taille, âge, score.
+5. Tu copies l'URL RSS dans qBittorrent.
+6. qBittorrent peut télécharger automatiquement les torrents qui correspondent aux règles.
 
-- Vite pour l'interface React
-- un serveur Node local pour `/api/ranked`, `/rss` et `/download`
+La clé API sert de connexion. Il n'y a plus de mot de passe admin côté utilisateur.
 
-Dans ce mode, l'app est accessible uniquement sur ta machine :
+## Architecture
 
-```text
-http://127.0.0.1:5173
-```
+Le projet fonctionne maintenant uniquement sur Cloudflare :
 
-Le flux RSS local est :
+- Cloudflare Workers pour l'interface et les endpoints
+- Cloudflare D1 pour le cache des métadonnées et les tokens RSS utilisateurs
+- Cloudflare Secrets pour les secrets serveur
+- qBittorrent côté utilisateur pour consommer le flux RSS
 
-```text
-http://127.0.0.1:4174/rss
-```
+Le mode local Node/Vite n'est plus le mode d'exécution cible, car l'application dépend de D1 et du Worker pour gérer les sessions, les tokens RSS et les clés API chiffrées.
 
-Ce mode ne demande pas de mot de passe, car il est expose uniquement en local.
+## Données Stockées
 
-### Mode Cloudflare
+D1 stocke :
 
-Le mode Cloudflare publie l'interface et les endpoints sur un Worker.
+- des métadonnées de torrents : titre, taille, date, seeders, leechers, catégorie, identifiant
+- les tokens RSS sous forme de hash
+- les clés API C411 chiffrées
 
-Dans ce mode :
+D1 ne doit pas stocker :
 
-- l'interface est protegee par mot de passe cote Worker
-- l'API `/api/*` demande une session valide
-- le RSS qBittorrent utilise un token dans l'URL
-- les URLs `/download` acceptent soit la session, soit le token RSS
-- la cle API C411 reste dans les secrets Cloudflare
+- de clé API C411 en clair
+- d'URL de téléchargement C411 contenant `apikey=`
+- de token RSS en clair
 
-Exemple d'URL publique :
+Le lien de téléchargement C411 est reconstruit au moment où qBittorrent appelle `/download`, avec la clé API associée au token RSS.
 
-```text
-https://ton-worker.workers.dev
-```
+## Configuration Cloudflare
 
-Exemple de RSS Cloudflare :
+Le Worker utilise `wrangler.toml` avec un binding D1 nommé `DB`.
 
-```text
-https://ton-worker.workers.dev/rss?token=TON_RSS_TOKEN
-```
-
-## Installation Locale
-
-```bash
-npm install
-cp .env.example .env
-```
-
-Puis edite `.env` :
-
-```env
-C411_API_URL=https://c411.org/api
-C411_API_KEY=ta_cle_api
-SERVER_PORT=4174
-
-MAX_SEEDERS=30
-MIN_LEECHERS=2
-MIN_SIZE_GB=1
-MAX_SIZE_GB=500
-MAX_AGE_HOURS=6
-MIN_SCORE=0
-MAX_RESULTS=40
-SCAN_RESULTS=800
-```
-
-Lance l'app :
-
-```bash
-npm run dev
-```
-
-Interface :
-
-```text
-http://127.0.0.1:5173
-```
-
-RSS local :
-
-```text
-http://127.0.0.1:4174/rss
-```
-
-## Deploiement Cloudflare
-
-Le fichier `wrangler.toml` n'est pas versionne volontairement. Cree-le localement a partir de ce modele :
+Exemple de base :
 
 ```toml
 name = "c411-seed-ranker"
 main = "./src/worker.js"
 compatibility_date = "2025-09-01"
-account_id = "TON_ACCOUNT_ID"
 
 workers_dev = true
 preview_urls = false
-
-[observability]
-enabled = false
 
 [assets]
 directory = "./dist"
@@ -135,92 +82,114 @@ MAX_AGE_HOURS = "6"
 MIN_SCORE = "0"
 MAX_RESULTS = "40"
 SCAN_RESULTS = "800"
+D1_CACHE_TTL_SECONDS = "900"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "c411-seed-ranker"
+database_id = "TON_DATABASE_ID"
 ```
 
-`run_worker_first = true` est important : il force Cloudflare a faire passer les requetes par le Worker avant de servir les fichiers statiques. Sans ca, l'ecran de login peut etre contourne par les assets.
+`run_worker_first = true` est important pour que les requêtes passent par le Worker avant les assets.
 
-Configure les secrets Cloudflare :
+## Secrets Nécessaires
 
 ```bash
-npx wrangler secret put C411_API_KEY
-npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put SESSION_SECRET
-npx wrangler secret put RSS_TOKEN
+npx wrangler secret put ENCRYPTION_SECRET
 ```
 
 Suggestions :
 
 ```bash
-openssl rand -hex 24  # ADMIN_PASSWORD
 openssl rand -hex 32  # SESSION_SECRET
-openssl rand -hex 32  # RSS_TOKEN
+openssl rand -hex 32  # ENCRYPTION_SECRET
 ```
 
-Puis deploie :
+Secrets qui ne sont plus nécessaires pour le fonctionnement utilisateur :
+
+- `ADMIN_PASSWORD`
+- `C411_API_KEY`
+- `RSS_TOKEN`
+
+La clé API C411 est fournie par chaque utilisateur sur la page de connexion.
+
+## D1
+
+Créer la base :
 
 ```bash
-npm run build
-npx wrangler deploy
+npx wrangler d1 create c411-seed-ranker
 ```
+
+Appliquer les migrations :
+
+```bash
+npx wrangler d1 execute DB --remote --file migrations/0001_cache_torrents.sql
+npx wrangler d1 execute DB --remote --file migrations/0002_multi_user_secure_cache.sql
+```
+
+Vérifier que la base ne contient pas d'URL sensible :
+
+```bash
+npx wrangler d1 execute DB --remote --command "SELECT COUNT(*) AS rows_total, SUM(CASE WHEN link LIKE '%apikey=%' THEN 1 ELSE 0 END) AS rows_with_apikey_in_link, SUM(CASE WHEN raw_json LIKE '%apikey=%' THEN 1 ELSE 0 END) AS rows_with_apikey_in_raw FROM torrent_cache;"
+```
+
+Les deux compteurs `rows_with_apikey_*` doivent rester à `0`.
+
+## Déploiement
+
+```bash
+npm install
+npm run build
+npm run deploy
+```
+
+`npm run deploy` publie le Worker avec Wrangler.
 
 ## qBittorrent
 
-Ajoute dans qBittorrent le flux RSS affiche par l'application.
+Dans qBittorrent :
 
-Pour l'auto-telechargement :
+1. Va dans RSS.
+2. Ajoute l'URL RSS copiée depuis l'application.
+3. Active le téléchargement automatique RSS.
+4. Crée une règle qui accepte le flux de C411 Seed Ranker.
+5. Ajuste les filtres dans l'application pour contrôler ce que qBittorrent récupère.
 
-1. Active le telechargement automatique RSS dans qBittorrent.
-2. Cree une regle RSS large.
-3. Applique cette regle au flux de l'app.
-4. Laisse l'app filtrer avec `minScore`, `maxAgeHours`, `minSizeGb`, etc.
-
-En local, le RSS n'a pas de token :
-
-```text
-http://127.0.0.1:4174/rss?...filtres...
-```
-
-Sur Cloudflare, le RSS a un token :
-
-```text
-https://ton-worker.workers.dev/rss?token=TON_RSS_TOKEN&...filtres...
-```
-
-qBittorrent ne sait pas utiliser le cookie de session de l'interface, donc le token RSS est necessaire pour ce mode.
+Le flux RSS est fait pour l'automatisation : qBittorrent peut récupérer les torrents à ta place dès qu'ils correspondent aux critères.
 
 ## Scoring
 
 Le score favorise :
 
 - peu de seeders
-- des leechers presents
-- un ratio leechers/seeders eleve
-- une taille suffisante
-- les torrents recents
+- des leechers présents
+- un ratio leechers/seeders élevé
+- une taille suffisante pour générer du volume
+- des torrents récents
 
 Filtres utiles :
 
-- `MAX_SEEDERS` : evite les torrents deja trop satures
+- `MAX_SEEDERS` : évite les torrents déjà trop saturés
 - `MIN_LEECHERS` : garde une demande minimale
-- `MIN_SIZE_GB` : evite les fichiers trop petits pour faire du volume
-- `MAX_SIZE_GB` : evite les torrents trop lourds
-- `MAX_AGE_HOURS` : garde les torrents recents
+- `MIN_SIZE_GB` : évite les fichiers trop petits pour faire du volume
+- `MAX_SIZE_GB` : évite les torrents trop lourds
+- `MAX_AGE_HOURS` : garde les torrents récents
 - `MIN_SCORE` : limite le RSS aux meilleurs scores
-- `SCAN_RESULTS` : nombre de resultats API a parcourir avant classement
+- `SCAN_RESULTS` : nombre de résultats API parcourus avant classement
 
-## Securite
+## Sécurité
 
-- `.env` contient les secrets locaux et n'est pas versionne.
-- `.env.example` contient uniquement des valeurs d'exemple.
-- `wrangler.toml` est ignore volontairement.
-- Sur Cloudflare, l'interface est protegee par mot de passe cote Worker.
+- La clé API C411 est fournie à la connexion.
+- Le token RSS est stocké en hash.
+- La clé API est stockée chiffrée.
+- Les liens C411 avec `apikey=` ne sont pas stockés en D1.
 - Le cookie de session est `HttpOnly`, `Secure` et `SameSite=Lax`.
-- Le RSS et les URLs de telechargement qBittorrent sont proteges par `RSS_TOKEN`.
-- La cle API C411 doit etre stockee en secret Cloudflare, jamais dans le code.
+- Seuls `SESSION_SECRET` et `ENCRYPTION_SECRET` doivent être configurés comme secrets serveur.
 
 ## Limitations
 
-- L'app ne connait pas ton ratio global de compte.
-- Le ratio affiche est calcule a partir de `leechers / seeders`.
-- Les donnees dependent de ce que l'API Torznab expose.
-- L'API distante peut repondre `429 Too Many Requests`; l'app utilise un cache court pour reduire ce risque.
+- L'application ne connaît pas ton ratio global C411.
+- Le ratio affiché dans le tableau est le rapport `leechers / seeders`, pas ton ratio de compte.
+- Les résultats dépendent des données exposées par l'API Torznab/C411.
