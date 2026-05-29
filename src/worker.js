@@ -547,9 +547,7 @@ function mergeRssHeldTorrents(current, held, filters) {
     const id = torrentId(torrent);
     if (!byId.has(id)) byId.set(id, torrent);
   }
-  return [...byId.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, filters.maxResults);
+  return rankTorrents([...byId.values()], filters);
 }
 
 async function readWatchlistRules(env, userId) {
