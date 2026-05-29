@@ -85,6 +85,24 @@ input {
   background: #4de1b0;
 }
 
+.compactSwitch {
+  gap: 0;
+}
+
+.compactSwitch .switchTrack {
+  width: 40px;
+  height: 22px;
+}
+
+.compactSwitch .switchThumb {
+  width: 14px;
+  height: 14px;
+}
+
+.compactSwitch input:checked + .switchTrack .switchThumb {
+  transform: translateX(18px);
+}
+
 .eyebrow {
   margin: 0 0 8px;
   color: #80c8d5;
@@ -158,11 +176,28 @@ a.download {
   text-decoration: none;
 }
 
+.torrentTitle {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.torrentTitle a:first-child {
+  color: #edf3ff;
+  text-decoration: none;
+}
+
+.torrentTitle a:first-child:hover {
+  color: #4de1b0;
+}
+
 .actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 170px;
+  min-width: 214px;
 }
 
 .checkButton {
@@ -177,6 +212,7 @@ a.download {
   padding: 0;
   color: #8fb7c4;
   background: #0a1720;
+  text-decoration: none;
 }
 
 .checkButton.active {
@@ -192,6 +228,21 @@ tr.isDownloaded td {
 
 tr.isDownloaded .score {
   color: #83e7c7;
+}
+
+.watchBadge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 180px;
+  overflow: hidden;
+  border: 1px solid rgba(77, 225, 176, 0.3);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #83e7c7;
+  background: rgba(77, 225, 176, 0.08);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel,
@@ -233,6 +284,136 @@ tr.isDownloaded .score {
   gap: 10px;
   padding: 14px;
   border-radius: 8px;
+}
+
+.radarGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.radarCard {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid rgba(154, 192, 205, 0.16);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.radarCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.radarCardTop strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #edf3ff;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.radarTools {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tinyIconButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 1px solid rgba(157, 192, 209, 0.24);
+  border-radius: 6px;
+  padding: 0;
+  color: #8fb7c4;
+  background: #0a1720;
+}
+
+.tinyIconButton:hover {
+  color: #4de1b0;
+}
+
+.radarStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.radarStats span {
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: #9fb4c3;
+  background: rgba(10, 23, 32, 0.78);
+  font-size: 11px;
+}
+
+.radarCard p {
+  min-height: 32px;
+  margin: 0;
+  overflow: hidden;
+  color: #8fb7c4;
+  font-size: 12px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.radarTorrentTable {
+  display: grid;
+  border-top: 1px solid rgba(154, 192, 205, 0.12);
+  padding-top: 8px;
+}
+
+.radarTorrentRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px 64px 64px;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(154, 192, 205, 0.08);
+  color: #a9bac8;
+  font-size: 12px;
+}
+
+.radarTorrentRow:last-child {
+  border-bottom: 0;
+}
+
+.radarTorrentHeader {
+  padding-top: 0;
+  color: #8fb7c4;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.radarTorrentRow a {
+  min-width: 0;
+  overflow: hidden;
+  color: #dce8ef;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.radarTorrentRow a:hover {
+  color: #4de1b0;
+}
+
+.radarTorrentRow strong {
+  color: #57e4b6;
+}
+
+.radarTorrentRow span,
+.radarTorrentRow strong {
+  text-align: right;
 }
 
 label {
@@ -322,6 +503,7 @@ code {
 
 .helpModal {
   width: min(760px, 100%);
+  max-height: min(82vh, 820px);
   border: 1px solid rgba(154, 192, 205, 0.24);
   border-radius: 8px;
   padding: 20px;
@@ -336,6 +518,27 @@ code {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
+}
+
+.helpModalHead p {
+  max-width: 620px;
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: #8fb7c4;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modalActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.addRadarButton {
+  padding: 10px 12px;
 }
 
 .helpModal h2 {
@@ -363,6 +566,117 @@ code {
   color: #a9bac8;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.radarModal {
+  width: min(900px, 100%);
+}
+
+.historyModal {
+  width: min(820px, 100%);
+}
+
+.editRadarModal {
+  width: min(560px, 100%);
+}
+
+.radarList {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  max-height: calc(82vh - 214px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.radarSearch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.radarTabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  padding: 4px;
+  background: rgba(10, 23, 32, 0.88);
+}
+
+.radarTabs button {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 9px 10px;
+  color: #9fb4c3;
+  background: transparent;
+}
+
+.radarTabs button.active {
+  border-color: rgba(77, 225, 176, 0.28);
+  color: #edf3ff;
+  background: rgba(77, 225, 176, 0.1);
+}
+
+.radarTabs span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: #062018;
+  background: #4de1b0;
+  font-size: 12px;
+}
+
+.historyTableWrap {
+  max-height: calc(82vh - 330px);
+  overflow: auto;
+  border: 1px solid rgba(154, 192, 205, 0.14);
+  border-radius: 8px;
+}
+
+.historyTable {
+  min-width: 620px;
+}
+
+.emptyState {
+  margin: 0;
+  color: #9fb4c3;
+}
+
+.editRadarForm {
+  display: grid;
+  gap: 14px;
+}
+
+.historyChart {
+  position: relative;
+  margin-bottom: 14px;
+  border: 1px solid rgba(154, 192, 205, 0.14);
+  border-radius: 8px;
+  padding: 14px;
+  color: #4de1b0;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.historyChart svg {
+  display: block;
+  width: 100%;
+  height: 180px;
+}
+
+.chartLabels {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: #8fb7c4;
+  font-size: 12px;
 }
 
 .tableWrap {
@@ -431,6 +745,11 @@ th {
     grid-template-columns: 1fr;
     align-items: stretch;
   }
+
+  .radarGrid,
+  .radarList {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -452,8 +771,29 @@ th {
     grid-template-columns: 1fr;
   }
 
+  .radarGrid,
+  .radarList {
+    grid-template-columns: 1fr;
+  }
+
   .topActions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .helpModalHead {
+    align-items: flex-start;
+  }
+
+  .modalActions {
+    gap: 8px;
+  }
+
+  .addRadarButton {
+    width: 40px;
+    height: 38px;
+    overflow: hidden;
+    padding: 0;
+    font-size: 0;
   }
 }

@@ -82,7 +82,9 @@ MAX_AGE_HOURS = "6"
 MIN_SCORE = "0"
 MAX_RESULTS = "40"
 SCAN_RESULTS = "800"
-D1_CACHE_TTL_SECONDS = "900"
+MEMORY_CACHE_TTL_SECONDS = "60"
+D1_CACHE_TTL_SECONDS = "60"
+RSS_D1_CACHE_TTL_SECONDS = "60"
 
 [[d1_databases]]
 binding = "DB"
@@ -178,6 +180,9 @@ Filtres utiles :
 - `MAX_AGE_HOURS` : garde les torrents récents
 - `MIN_SCORE` : limite le RSS aux meilleurs scores
 - `SCAN_RESULTS` : nombre de résultats API parcourus avant classement
+- `MEMORY_CACHE_TTL_SECONDS` : micro-cache mémoire de l'interface, gardé court pour éviter les doublons immédiats sans masquer les données du cron
+- `D1_CACHE_TTL_SECONDS` : fraîcheur D1 pour l'interface web ; `60` laisse le cron minute fournir les données fraîches
+- `RSS_D1_CACHE_TTL_SECONDS` : fraîcheur D1 affichée pour qBittorrent ; le RSS lit D1 directement et ne retape pas l'API à chaque appel
 
 ## Sécurité
 

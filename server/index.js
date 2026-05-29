@@ -14,7 +14,7 @@ const distDir = join(root, "dist");
 const port = Number(process.env.SERVER_PORT || 4174);
 const downloadCache = new Map();
 const rankedCache = new Map();
-const CACHE_TTL_MS = 2 * 60 * 1000;
+const CACHE_TTL_MS = 60 * 1000;
 
 function env(name, fallback = "") {
   return process.env[name] || fallback;

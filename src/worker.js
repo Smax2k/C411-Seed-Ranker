@@ -1,9 +1,19 @@
 import { fetchTorznabPages } from "../server/torznab.js";
-import { rankTorrents, toNumber } from "../server/scoring.js";
+import { rankTorrents, scoreTorrent, toNumber } from "../server/scoring.js";
 
 const rankedCache = new Map();
-const CACHE_TTL_MS = 2 * 60 * 1000;
-const DEFAULT_D1_CACHE_TTL_SECONDS = 15 * 60;
+const DEFAULT_MEMORY_CACHE_TTL_SECONDS = 60;
+const DEFAULT_D1_CACHE_TTL_SECONDS = 60;
+const DEFAULT_RSS_D1_CACHE_TTL_SECONDS = 60;
+const SNAPSHOT_LOOKBACK_MS = 45 * 60 * 1000;
+const SNAPSHOT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const SNAPSHOT_MIN_UNCHANGED_MS = 15 * 60 * 1000;
+const RSS_HIT_KEEP_MS = 10 * 60 * 1000;
+const WATCHLIST_DEFAULT_BONUS = 650;
+const RADAR_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const RADAR_MEMORY_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
+const RADAR_MAX_SEEN_TORRENTS = 240;
+const RADAR_MAX_LATEST_TORRENTS = 8;
 const SESSION_COOKIE = "c411_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
@@ -32,6 +42,41 @@ function torrentId(torrent) {
   return torrent.infohash || torrent.guid || btoa(unescape(encodeURIComponent(torrent.title))).slice(0, 48);
 }
 
+function titleFamilyKey(title) {
+  return String(title || "")
+    .replace(/\[[^\]]+\]|\([^)]+\)/g, " ")
+    .replace(/\b(?:19|20)\d{2}\b/g, " ")
+    .replace(/\bS\d{1,2}E\d{1,3}\b/gi, " ")
+    .replace(/\b\d{1,2}x\d{1,3}\b/gi, " ")
+    .replace(/\b(?:complete|final|multi|vostfr|vff|vfq|french|truefrench|subfrench|vo|1080p|2160p|720p|480p|web|webrip|web-dl|hdtv|bluray|bdrip|hdr|dv|sdr|remux|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|atmos|ddp?5?\.?1?)\b/gi, " ")
+    .replace(/\b(?:repack|proper|internal|extended|unrated|readnfo)\b/gi, " ")
+    .replace(/[-_.]+/g, " ")
+    .replace(/[^a-z0-9 ]/gi, " ")
+    .toLowerCase()
+    .replace(/\b(?:fw|batgirl|flux|fervex|lost|mircrew|ggez)\b$/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleFamilyLabel(title) {
+  const key = titleFamilyKey(title);
+  if (!key) return "";
+  return key.split(" ").map((part) => part ? part[0].toUpperCase() + part.slice(1) : "").join(" ");
+}
+
+function safeJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function dayKey(timestamp) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
 function buildC411DownloadLink(baseUrl, apiKey, id) {
   const url = new URL(baseUrl);
   url.searchParams.set("t", "get");
@@ -52,6 +97,20 @@ function d1CacheTtlMs(env) {
   return toNumber(
     envValue(env, "D1_CACHE_TTL_SECONDS"),
     DEFAULT_D1_CACHE_TTL_SECONDS
+  ) * 1000;
+}
+
+function rssD1CacheTtlMs(env) {
+  return toNumber(
+    envValue(env, "RSS_D1_CACHE_TTL_SECONDS"),
+    DEFAULT_RSS_D1_CACHE_TTL_SECONDS
+  ) * 1000;
+}
+
+function memoryCacheTtlMs(env) {
+  return toNumber(
+    envValue(env, "MEMORY_CACHE_TTL_SECONDS"),
+    DEFAULT_MEMORY_CACHE_TTL_SECONDS
   ) * 1000;
 }
 
@@ -155,6 +214,576 @@ async function writeCachedTorrents(env, key, filters, torrents, targetScan) {
   ).bind(key, now).run();
 }
 
+async function readRecentSnapshots(env, key, userId, now) {
+  if (!hasD1(env)) return new Map();
+  const rows = await env.DB.prepare(
+    "SELECT torrent_key, seeders, leechers, grabs, score, seen_at FROM torrent_score_snapshots WHERE user_id = ? AND scope_key = ? AND seen_at >= ? ORDER BY seen_at DESC"
+  ).bind(userId || "", key, now - SNAPSHOT_LOOKBACK_MS).all();
+  const snapshots = new Map();
+  for (const row of rows.results || []) {
+    if (!snapshots.has(row.torrent_key) && row.seen_at < now) {
+      snapshots.set(row.torrent_key, row);
+    }
+  }
+  return snapshots;
+}
+
+function dynamicBonus(torrent, previous, now) {
+  if (!previous) return 0;
+
+  const minutes = Math.max((now - previous.seen_at) / 60000, 1);
+  const leecherGrowth = Math.max(toNumber(torrent.leechers) - toNumber(previous.leechers), 0);
+  const seederGrowth = Math.max(toNumber(torrent.seeders) - toNumber(previous.seeders), 0);
+  const grabGrowth = Math.max(toNumber(torrent.grabs) - toNumber(previous.grabs), 0);
+  const leecherRate = leecherGrowth / minutes;
+  const seederRate = seederGrowth / minutes;
+  const ageMinutes = torrent.pubDate
+    ? Math.max((now - new Date(torrent.pubDate).getTime()) / 60000, 0)
+    : Number.POSITIVE_INFINITY;
+
+  const demandSurge = Math.min(520, leecherRate * 90 + leecherGrowth * 5);
+  const earlyDemand = ageMinutes <= 45 && toNumber(torrent.leechers) >= 8 ? 180 : 0;
+  const ratioMomentum = leecherGrowth > seederGrowth ? Math.min(220, (leecherGrowth - seederGrowth) * 8) : 0;
+  const grabSignal = Math.min(120, grabGrowth * 24);
+  const saturationPenalty = Math.min(380, seederRate * 80 + Math.max(toNumber(torrent.seeders) - 12, 0) * 10);
+
+  return Math.max(0, demandSurge + earlyDemand + ratioMomentum + grabSignal - saturationPenalty);
+}
+
+async function applyDynamicBonuses(env, key, userId, torrents, now) {
+  const previousByTorrent = await readRecentSnapshots(env, key, userId, now);
+  return torrents.map((torrent) => {
+    const id = torrentId(torrent);
+    const bonus = dynamicBonus(torrent, previousByTorrent.get(id), now);
+    return bonus ? { ...torrent, dynamicScoreBonus: bonus } : torrent;
+  });
+}
+
+async function readEnabledWatchlistRules(env, userId) {
+  if (!hasD1(env)) return [];
+  const rows = await env.DB.prepare(
+    "SELECT pattern_key, label, bonus FROM watchlist_rules WHERE user_id = ? AND enabled = 1 ORDER BY updated_at DESC"
+  ).bind(userId || "").all();
+  return rows.results || [];
+}
+
+function applyWatchlistBonuses(torrents, rules) {
+  if (!rules.length) return torrents;
+  return torrents.map((torrent) => {
+    const familyKey = titleFamilyKey(torrent.title);
+    const matched = rules.find((rule) => familyKey === rule.pattern_key || familyKey.includes(rule.pattern_key) || rule.pattern_key.includes(familyKey));
+    if (!matched) return torrent;
+    return {
+      ...torrent,
+      watchlistLabel: matched.label,
+      watchlistScoreBonus: Math.max(toNumber(matched.bonus), 0)
+    };
+  });
+}
+
+async function writeScoreSnapshots(env, key, userId, torrents, now) {
+  if (!hasD1(env) || !torrents.length) return;
+
+  const previousByTorrent = await readRecentSnapshots(env, key, userId, now);
+  const statements = [];
+  for (const torrent of torrents) {
+    const previous = previousByTorrent.get(torrentId(torrent));
+    const unchanged = previous
+      && toNumber(previous.seeders) === toNumber(torrent.seeders)
+      && toNumber(previous.leechers) === toNumber(torrent.leechers)
+      && toNumber(previous.grabs) === toNumber(torrent.grabs)
+      && Math.abs(toNumber(previous.score) - toNumber(torrent.score)) < 5
+      && now - previous.seen_at < SNAPSHOT_MIN_UNCHANGED_MS;
+    if (unchanged) continue;
+
+    statements.push(env.DB.prepare(`
+      INSERT OR REPLACE INTO torrent_score_snapshots (
+        user_id, scope_key, torrent_key, title, guid, pub_date, category, seeders, leechers,
+        grabs, size_bytes, score, seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      userId || "",
+      key,
+      torrentId(torrent),
+      torrent.title || "",
+      torrent.guid || "",
+      torrent.pubDate || "",
+      torrent.category || "",
+      Math.max(toNumber(torrent.seeders), 0),
+      Math.max(toNumber(torrent.leechers), 0),
+      Math.max(toNumber(torrent.grabs), 0),
+      Math.max(toNumber(torrent.sizeBytes), 0),
+      Math.max(toNumber(torrent.score), 0),
+      now
+    ));
+
+    if (statements.length >= 50) {
+      await env.DB.batch(statements.splice(0));
+    }
+  }
+
+  if (!statements.length) return;
+  if (statements.length) await env.DB.batch(statements);
+
+  await env.DB.prepare(
+    "DELETE FROM torrent_score_snapshots WHERE user_id = ? AND scope_key = ? AND seen_at < ?"
+  ).bind(userId || "", key, now - SNAPSHOT_RETENTION_MS).run();
+}
+
+function compactRadarTorrent(torrent, seenAt) {
+  const id = torrentId(torrent);
+  return {
+    id,
+    title: torrent.title || "",
+    seeders: Math.max(toNumber(torrent.seeders), 0),
+    leechers: Math.max(toNumber(torrent.leechers), 0),
+    grabs: Math.max(toNumber(torrent.grabs), 0),
+    score: Math.max(toNumber(torrent.score), 0),
+    seenAt
+  };
+}
+
+function buildCurrentRadarGroups(torrents, now) {
+  const groups = new Map();
+  for (const torrent of torrents) {
+    const patternKey = titleFamilyKey(torrent.title);
+    if (!patternKey || patternKey.length < 4 || patternKey.split(" ").length < 2) continue;
+    const existing = groups.get(patternKey) || {
+      patternKey,
+      label: titleFamilyLabel(torrent.title),
+      appearanceCount: 0,
+      torrents: new Map(),
+      maxScore: 0,
+      maxLeechers: 0,
+      maxSeeders: 0,
+      latestTitle: torrent.title || "",
+      lastSeenAt: 0
+    };
+    const compact = compactRadarTorrent(torrent, now);
+    existing.appearanceCount += 1;
+    existing.torrents.set(compact.id, compact);
+    existing.maxScore = Math.max(existing.maxScore, compact.score);
+    existing.maxLeechers = Math.max(existing.maxLeechers, compact.leechers);
+    existing.maxSeeders = Math.max(existing.maxSeeders, compact.seeders);
+    if (now >= existing.lastSeenAt) {
+      existing.lastSeenAt = now;
+      existing.latestTitle = torrent.title || existing.latestTitle;
+    }
+    groups.set(patternKey, existing);
+  }
+  return groups;
+}
+
+async function writeRadarFamilyStats(env, key, userId, torrents, now) {
+  if (!hasD1(env) || !torrents.length) return;
+  const currentGroups = buildCurrentRadarGroups(torrents, now);
+  if (!currentGroups.size) return;
+
+  const rows = await env.DB.prepare(
+    "SELECT pattern_key, label, first_seen_at, last_seen_at, active_days, seen_torrents, appearance_count, max_score, max_leechers, max_seeders, latest_title, latest_torrents FROM radar_family_stats WHERE user_id = ? AND scope_key = ?"
+  ).bind(userId || "", key).all();
+  const existingByKey = new Map((rows.results || []).map((row) => [row.pattern_key, row]));
+  const cutoff = now - RADAR_MEMORY_RETENTION_MS;
+  const cutoffDay = dayKey(cutoff);
+  const today = dayKey(now);
+  const statements = [];
+
+  for (const group of currentGroups.values()) {
+    const existing = existingByKey.get(group.patternKey);
+    const activeDays = new Set(safeJsonArray(existing?.active_days).filter((day) => day >= cutoffDay));
+    activeDays.add(today);
+
+    const seenById = new Map();
+    for (const item of safeJsonArray(existing?.seen_torrents)) {
+      if (!item?.id || toNumber(item.seenAt) < cutoff) continue;
+      seenById.set(item.id, {
+        id: item.id,
+        title: item.title || "",
+        seenAt: toNumber(item.seenAt)
+      });
+    }
+    for (const torrent of group.torrents.values()) {
+      seenById.set(torrent.id, {
+        id: torrent.id,
+        title: torrent.title,
+        seenAt: torrent.seenAt
+      });
+    }
+    const seenTorrents = [...seenById.values()]
+      .sort((a, b) => b.seenAt - a.seenAt)
+      .slice(0, RADAR_MAX_SEEN_TORRENTS);
+
+    const latestById = new Map();
+    for (const item of safeJsonArray(existing?.latest_torrents)) {
+      if (!item?.id || toNumber(item.seenAt) < cutoff) continue;
+      latestById.set(item.id, {
+        id: item.id,
+        title: item.title || "",
+        seeders: Math.max(toNumber(item.seeders), 0),
+        leechers: Math.max(toNumber(item.leechers), 0),
+        grabs: Math.max(toNumber(item.grabs), 0),
+        score: Math.max(toNumber(item.score), 0),
+        seenAt: toNumber(item.seenAt)
+      });
+    }
+    for (const torrent of group.torrents.values()) {
+      latestById.set(torrent.id, torrent);
+    }
+    const latestTorrents = [...latestById.values()]
+      .sort((a, b) => b.seenAt - a.seenAt || b.score - a.score)
+      .slice(0, RADAR_MAX_LATEST_TORRENTS);
+
+    const lastSeenAt = Math.max(toNumber(existing?.last_seen_at), group.lastSeenAt);
+    const latestTitle = lastSeenAt === group.lastSeenAt
+      ? group.latestTitle
+      : existing?.latest_title || group.latestTitle;
+
+    statements.push(env.DB.prepare(`
+      INSERT INTO radar_family_stats (
+        user_id, scope_key, pattern_key, label, first_seen_at, last_seen_at, active_days,
+        active_day_count, seen_torrents, torrent_count, appearance_count, max_score,
+        max_leechers, max_seeders, latest_title, latest_torrents, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, scope_key, pattern_key) DO UPDATE SET
+        label = excluded.label,
+        first_seen_at = excluded.first_seen_at,
+        last_seen_at = excluded.last_seen_at,
+        active_days = excluded.active_days,
+        active_day_count = excluded.active_day_count,
+        seen_torrents = excluded.seen_torrents,
+        torrent_count = excluded.torrent_count,
+        appearance_count = excluded.appearance_count,
+        max_score = excluded.max_score,
+        max_leechers = excluded.max_leechers,
+        max_seeders = excluded.max_seeders,
+        latest_title = excluded.latest_title,
+        latest_torrents = excluded.latest_torrents,
+        updated_at = excluded.updated_at
+    `).bind(
+      userId || "",
+      key,
+      group.patternKey,
+      group.label,
+      existing ? Math.min(toNumber(existing.first_seen_at, now), now) : now,
+      lastSeenAt,
+      JSON.stringify([...activeDays].sort()),
+      activeDays.size,
+      JSON.stringify(seenTorrents),
+      seenTorrents.length,
+      toNumber(existing?.appearance_count) + group.appearanceCount,
+      Math.max(toNumber(existing?.max_score), group.maxScore),
+      Math.max(toNumber(existing?.max_leechers), group.maxLeechers),
+      Math.max(toNumber(existing?.max_seeders), group.maxSeeders),
+      latestTitle,
+      JSON.stringify(latestTorrents),
+      now
+    ));
+
+    if (statements.length >= 50) {
+      await env.DB.batch(statements.splice(0));
+    }
+  }
+
+  if (statements.length) await env.DB.batch(statements);
+  await env.DB.prepare(
+    "DELETE FROM radar_family_stats WHERE user_id = ? AND last_seen_at < ?"
+  ).bind(userId || "", cutoff).run();
+}
+
+async function readActiveRssHits(env, key, userId, now) {
+  if (!hasD1(env)) return [];
+  const rows = await env.DB.prepare(
+    "SELECT torrent_key, title, guid, pub_date, category, seeders, leechers, grabs, size_bytes, score, keep_until FROM rss_score_hits WHERE user_id = ? AND scope_key = ? AND keep_until >= ? ORDER BY score DESC"
+  ).bind(userId || "", key, now).all();
+  return (rows.results || []).map((row) => ({
+    title: row.title,
+    guid: row.guid,
+    pubDate: row.pub_date,
+    category: row.category,
+    seeders: row.seeders,
+    leechers: row.leechers,
+    grabs: row.grabs,
+    infohash: row.torrent_key,
+    sizeBytes: row.size_bytes,
+    score: row.score,
+    rssHeldUntil: row.keep_until
+  }));
+}
+
+async function writeRssHits(env, key, userId, torrents, now) {
+  if (!hasD1(env) || !torrents.length) return;
+
+  const statements = torrents.map((torrent) => env.DB.prepare(`
+    INSERT OR REPLACE INTO rss_score_hits (
+      user_id, scope_key, torrent_key, title, guid, pub_date, category, seeders, leechers,
+      grabs, size_bytes, score, hit_at, keep_until
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    userId || "",
+    key,
+    torrentId(torrent),
+    torrent.title || "",
+    torrent.guid || "",
+    torrent.pubDate || "",
+    torrent.category || "",
+    Math.max(toNumber(torrent.seeders), 0),
+    Math.max(toNumber(torrent.leechers), 0),
+    Math.max(toNumber(torrent.grabs), 0),
+    Math.max(toNumber(torrent.sizeBytes), 0),
+    Math.max(toNumber(torrent.score), 0),
+    now,
+    now + RSS_HIT_KEEP_MS
+  ));
+
+  await env.DB.batch(statements);
+  await env.DB.prepare(
+    "DELETE FROM rss_score_hits WHERE user_id = ? AND scope_key = ? AND keep_until < ?"
+  ).bind(userId || "", key, now).run();
+}
+
+function mergeRssHeldTorrents(current, held, filters) {
+  const byId = new Map(current.map((torrent) => [torrentId(torrent), torrent]));
+  for (const torrent of held) {
+    const id = torrentId(torrent);
+    if (!byId.has(id)) byId.set(id, torrent);
+  }
+  return [...byId.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, filters.maxResults);
+}
+
+async function readWatchlistRules(env, userId) {
+  if (!hasD1(env)) return [];
+  const rows = await env.DB.prepare(
+    "SELECT pattern_key, label, bonus, enabled, updated_at FROM watchlist_rules WHERE user_id = ? ORDER BY updated_at DESC"
+  ).bind(userId || "").all();
+  return (rows.results || []).map((row) => ({
+    patternKey: row.pattern_key,
+    label: row.label,
+    bonus: row.bonus,
+    enabled: Boolean(row.enabled),
+    updatedAt: row.updated_at
+  }));
+}
+
+function matchingWatchlistRule(familyKey, rules) {
+  return rules.find((rule) => familyKey === rule.patternKey || familyKey.includes(rule.patternKey) || rule.patternKey.includes(familyKey));
+}
+
+function radarGroupFor(groups, patternKey, label) {
+  const existing = groups.get(patternKey);
+  if (existing) return existing;
+  const group = {
+    patternKey,
+    label,
+    appearances: 0,
+    activeDayCount: 0,
+    firstSeenAt: 0,
+    torrentKeys: new Set(),
+    torrents: new Map(),
+    maxScore: 0,
+    maxLeechers: 0,
+    maxSeeders: 0,
+    lastSeenAt: 0,
+    latestTitle: label
+  };
+  groups.set(patternKey, group);
+  return group;
+}
+
+function addRadarTorrent(group, torrent) {
+  if (!torrent.id) return;
+  group.torrentKeys.add(torrent.id);
+  const currentTorrent = group.torrents.get(torrent.id);
+  if (!currentTorrent || toNumber(torrent.seenAt) > currentTorrent.seenAt) {
+    group.torrents.set(torrent.id, {
+      id: torrent.id,
+      title: torrent.title,
+      pageUrl: `https://c411.org/torrents/${encodeURIComponent(torrent.id)}`,
+      seeders: torrent.seeders,
+      leechers: torrent.leechers,
+      grabs: torrent.grabs,
+      score: torrent.score,
+      seenAt: torrent.seenAt
+    });
+  }
+}
+
+async function detectedRadars(env, userId, rules = []) {
+  if (!hasD1(env)) return [];
+  const now = Date.now();
+  const longRows = await env.DB.prepare(
+    "SELECT pattern_key, label, first_seen_at, last_seen_at, active_day_count, seen_torrents, torrent_count, appearance_count, max_score, max_leechers, max_seeders, latest_title, latest_torrents FROM radar_family_stats WHERE user_id = ? AND last_seen_at >= ? ORDER BY last_seen_at DESC LIMIT 240"
+  ).bind(userId || "", now - RADAR_MEMORY_RETENTION_MS).all();
+  const rows = await env.DB.prepare(
+    "SELECT title, torrent_key, seeders, leechers, grabs, score, seen_at FROM torrent_score_snapshots WHERE user_id = ? AND seen_at >= ? ORDER BY seen_at DESC LIMIT 1600"
+  ).bind(userId || "", now - RADAR_LOOKBACK_MS).all();
+  const groups = new Map();
+
+  for (const row of longRows.results || []) {
+    const rule = matchingWatchlistRule(row.pattern_key, rules);
+    const key = rule?.patternKey || row.pattern_key;
+    const group = radarGroupFor(groups, key, rule?.label || row.label || titleFamilyLabel(row.pattern_key));
+    group.appearances += toNumber(row.appearance_count);
+    group.activeDayCount = Math.max(group.activeDayCount, toNumber(row.active_day_count));
+    group.firstSeenAt = group.firstSeenAt
+      ? Math.min(group.firstSeenAt, toNumber(row.first_seen_at))
+      : toNumber(row.first_seen_at);
+    group.maxScore = Math.max(group.maxScore, toNumber(row.max_score));
+    group.maxLeechers = Math.max(group.maxLeechers, toNumber(row.max_leechers));
+    group.maxSeeders = Math.max(group.maxSeeders, toNumber(row.max_seeders));
+    if (toNumber(row.last_seen_at) > group.lastSeenAt) {
+      group.lastSeenAt = toNumber(row.last_seen_at);
+      group.latestTitle = row.latest_title || group.latestTitle;
+    }
+    for (const item of safeJsonArray(row.seen_torrents)) {
+      if (item?.id) group.torrentKeys.add(item.id);
+    }
+    for (const item of safeJsonArray(row.latest_torrents)) {
+      addRadarTorrent(group, {
+        id: item.id,
+        title: item.title || row.latest_title || row.label,
+        seeders: Math.max(toNumber(item.seeders), 0),
+        leechers: Math.max(toNumber(item.leechers), 0),
+        grabs: Math.max(toNumber(item.grabs), 0),
+        score: Math.max(toNumber(item.score), 0),
+        seenAt: toNumber(item.seenAt, row.last_seen_at)
+      });
+    }
+    if (!group.torrentKeys.size) {
+      group.torrentKeys.add(`${row.pattern_key}:${row.first_seen_at}`);
+    }
+  }
+
+  for (const row of rows.results || []) {
+    const familyKey = titleFamilyKey(row.title);
+    if (!familyKey || familyKey.length < 4 || familyKey.split(" ").length < 2) continue;
+    const rule = matchingWatchlistRule(familyKey, rules);
+    const key = rule?.patternKey || familyKey;
+    const group = radarGroupFor(groups, key, rule?.label || titleFamilyLabel(row.title));
+
+    group.appearances += 1;
+    addRadarTorrent(group, {
+      id: row.torrent_key,
+      title: row.title,
+      seeders: row.seeders,
+      leechers: row.leechers,
+      grabs: row.grabs,
+      score: row.score,
+      seenAt: row.seen_at
+    });
+    group.maxScore = Math.max(group.maxScore, toNumber(row.score));
+    group.maxLeechers = Math.max(group.maxLeechers, toNumber(row.leechers));
+    group.maxSeeders = Math.max(group.maxSeeders, toNumber(row.seeders));
+    if (toNumber(row.seen_at) > group.lastSeenAt) {
+      group.lastSeenAt = row.seen_at;
+      group.latestTitle = row.title;
+    }
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      torrentCount: group.torrentKeys.size,
+      torrentKeys: undefined,
+      torrents: [...group.torrents.values()]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8),
+      heat: Math.round(
+        group.maxScore
+        + group.maxLeechers * 8
+        + group.torrentKeys.size * 60
+        + Math.min(group.appearances, 80) * 4
+        + Math.min(group.activeDayCount || 0, 14) * 90
+      )
+    }))
+    .filter((group) => group.maxLeechers >= 4 || group.maxScore >= 180 || group.torrentCount >= 2 || group.activeDayCount >= 2)
+    .sort((a, b) => b.heat - a.heat)
+    .slice(0, 60);
+}
+
+async function watchlistPayload(env, userId) {
+  const rules = await readWatchlistRules(env, userId);
+  const rulesByKey = new Map(rules.map((rule) => [rule.patternKey, rule]));
+  const radars = (await detectedRadars(env, userId, rules)).map((radar) => {
+    const rule = rulesByKey.get(radar.patternKey);
+    return {
+      ...radar,
+      enabled: rule ? rule.enabled : false,
+      bonus: rule ? rule.bonus : WATCHLIST_DEFAULT_BONUS
+    };
+  });
+
+  for (const rule of rules) {
+    if (!radars.some((radar) => radar.patternKey === rule.patternKey)) {
+      radars.push({
+        patternKey: rule.patternKey,
+        label: rule.label,
+        appearances: 0,
+        torrentCount: 0,
+        maxScore: 0,
+        maxLeechers: 0,
+        maxSeeders: 0,
+        lastSeenAt: rule.updatedAt,
+        latestTitle: rule.label,
+        torrents: [],
+        heat: rule.bonus,
+        enabled: rule.enabled,
+        bonus: rule.bonus
+      });
+    }
+  }
+
+  return { radars, rules };
+}
+
+async function upsertWatchlistRule(env, userId, payload) {
+  if (!hasD1(env)) throw new Error("D1 DB manquante");
+  const label = String(payload.label || "").trim();
+  const patternKey = titleFamilyKey(payload.patternKey || payload.label);
+  if (!patternKey || !label) throw new Error("Radar invalide");
+
+  const enabled = payload.enabled === false ? 0 : 1;
+  const bonus = Math.max(toNumber(payload.bonus, WATCHLIST_DEFAULT_BONUS), 0);
+  const now = Date.now();
+  const originalPatternKey = titleFamilyKey(payload.originalPatternKey || "");
+  if (originalPatternKey && originalPatternKey !== patternKey) {
+    await env.DB.prepare(
+      "DELETE FROM watchlist_rules WHERE user_id = ? AND pattern_key = ?"
+    ).bind(userId || "", originalPatternKey).run();
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO watchlist_rules (user_id, pattern_key, label, bonus, enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, pattern_key) DO UPDATE SET
+      label = excluded.label,
+      bonus = excluded.bonus,
+      enabled = excluded.enabled,
+      updated_at = excluded.updated_at
+  `).bind(userId || "", patternKey, label, bonus, enabled, now, now).run();
+
+  return watchlistPayload(env, userId);
+}
+
+async function torrentHistoryPayload(env, userId, torrentKey) {
+  if (!hasD1(env) || !torrentKey) return { history: [] };
+  const rows = await env.DB.prepare(
+    "SELECT title, seeders, leechers, grabs, score, seen_at FROM torrent_score_snapshots WHERE user_id = ? AND torrent_key = ? ORDER BY seen_at DESC LIMIT 80"
+  ).bind(userId || "", torrentKey).all();
+
+  return {
+    history: (rows.results || []).map((row) => ({
+      title: row.title,
+      seeders: row.seeders,
+      leechers: row.leechers,
+      grabs: row.grabs,
+      score: row.score,
+      seenAt: row.seen_at
+    }))
+  };
+}
+
 function bytesToBase64Url(bytes) {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -255,6 +884,66 @@ async function apiKeyFromRssToken(token, env) {
     source: "user",
     userId: row.id
   };
+}
+
+async function activeCronUsers(env) {
+  if (!hasD1(env)) return [];
+  const rows = await env.DB.prepare(
+    "SELECT id, api_key_ciphertext, api_key_iv FROM rss_users WHERE last_used_at IS NOT NULL ORDER BY last_used_at DESC"
+  ).all();
+
+  const users = [];
+  for (const row of rows.results || []) {
+    users.push({
+      userId: row.id,
+      apiKey: await decryptText(row.api_key_ciphertext, row.api_key_iv, env)
+    });
+  }
+  return users;
+}
+
+async function recentUserScopes(env, userId) {
+  if (!hasD1(env)) return [{ query: "", categories: "" }];
+  const rows = await env.DB.prepare(
+    "SELECT scope_key FROM torrent_scan_states ORDER BY scanned_at DESC"
+  ).all();
+  const scopes = [];
+  const seen = new Set();
+  for (const row of rows.results || []) {
+    try {
+      const parsed = JSON.parse(row.scope_key);
+      if (parsed.userId !== userId) continue;
+      const scope = {
+        query: parsed.query || "",
+        categories: parsed.categories || ""
+      };
+      const key = JSON.stringify(scope);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      scopes.push(scope);
+    } catch {
+      // Ignore older or malformed scope keys.
+    }
+  }
+  return scopes.length ? scopes : [{ query: "", categories: "" }];
+}
+
+async function warmCronScans(env) {
+  const users = await activeCronUsers(env);
+  for (const user of users) {
+    const scopes = await recentUserScopes(env, user.userId);
+    for (const scope of scopes) {
+      const url = new URL("https://cron.local/api/ranked");
+      url.searchParams.set("fresh", "1");
+      if (scope.query) url.searchParams.set("q", scope.query);
+      if (scope.categories) url.searchParams.set("cat", scope.categories);
+      await ranked(url, env, {
+        apiKey: user.apiKey,
+        userId: user.userId,
+        source: "cron"
+      });
+    }
+  }
 }
 
 function clientIp(request) {
@@ -437,23 +1126,31 @@ function loginPage(error = "") {
 
 function publicTorrent(torrent) {
   const id = torrentId(torrent);
+  const pageUrl = torrent.infohash ? `https://c411.org/torrents/${encodeURIComponent(torrent.infohash)}` : "";
 
   return {
     id,
     title: torrent.title,
     guid: torrent.guid,
+    pageUrl,
     pubDate: torrent.pubDate,
     category: torrent.category,
     seeders: torrent.seeders,
     leechers: torrent.leechers,
     sizeBytes: torrent.sizeBytes,
-    score: torrent.score
+    score: torrent.score,
+    dynamicScoreBonus: torrent.dynamicScoreBonus || 0,
+    watchlistScoreBonus: torrent.watchlistScoreBonus || 0,
+    watchlistLabel: torrent.watchlistLabel || ""
   };
 }
 
 async function ranked(url, env, options = {}) {
   const apiKey = options.apiKey;
   const userId = options.userId || "";
+  const sourceType = options.source || "ui";
+  const cacheOnly = options.cacheOnly === true;
+  const forceRefresh = url.searchParams.get("fresh") === "1";
   const baseUrl = envValue(env, "C411_API_URL", "https://c411.org/api");
   if (!apiKey || apiKey === "remplace_moi") {
     throw new Error("Clé API C411 manquante pour cette session");
@@ -462,7 +1159,7 @@ async function ranked(url, env, options = {}) {
   const filters = filtersFrom(url, env);
   const cacheKey = JSON.stringify({ userId, filters });
   const cached = rankedCache.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt < CACHE_TTL_MS) {
+  if (!cacheOnly && !forceRefresh && cached && Date.now() - cached.createdAt < memoryCacheTtlMs(env)) {
     return options.publicView
       ? { ...cached.data, torrents: cached.data.torrents.map(publicTorrent) }
       : cached.data;
@@ -475,13 +1172,18 @@ async function ranked(url, env, options = {}) {
   const effectiveTargetScan = Math.min(targetScan, 2000);
   const key = scopeKey(filters, userId);
   const state = await readScanState(env, key);
-  const cacheIsFresh = state && Date.now() - state.scanned_at <= d1CacheTtlMs(env);
+  const cacheTtlMs = sourceType === "rss" ? rssD1CacheTtlMs(env) : d1CacheTtlMs(env);
+  const cacheIsFresh = !forceRefresh && state && Date.now() - state.scanned_at <= cacheTtlMs;
   let torrents = [];
   let source = "api";
   let stale = false;
   let warning = "";
 
-  if (cacheIsFresh) {
+  if (cacheOnly) {
+    torrents = await readCachedTorrents(env, key);
+    source = "d1";
+    stale = Boolean(state?.scanned_at && Date.now() - state.scanned_at > cacheTtlMs);
+  } else if (cacheIsFresh) {
     torrents = await readCachedTorrents(env, key);
     source = "d1";
   } else {
@@ -507,7 +1209,23 @@ async function ranked(url, env, options = {}) {
     }
   }
 
-  const rankedTorrents = rankTorrents(torrents, filters);
+  const now = Date.now();
+  const watchlistRules = await readEnabledWatchlistRules(env, userId);
+  const watchedTorrents = applyWatchlistBonuses(torrents, watchlistRules);
+  const scoredTorrents = (await applyDynamicBonuses(env, key, userId, watchedTorrents, now))
+    .map((torrent) => ({
+      ...torrent,
+      score: scoreTorrent(torrent, filters)
+    }));
+  await writeScoreSnapshots(env, key, userId, scoredTorrents, now);
+  await writeRadarFamilyStats(env, key, userId, scoredTorrents, now);
+
+  let rankedTorrents = rankTorrents(scoredTorrents, filters);
+  if (sourceType === "rss") {
+    await writeRssHits(env, key, userId, rankedTorrents, now);
+    const heldTorrents = await readActiveRssHits(env, key, userId, now);
+    rankedTorrents = mergeRssHeldTorrents(rankedTorrents, heldTorrents, filters);
+  }
 
   const data = {
     filters,
@@ -516,6 +1234,7 @@ async function ranked(url, env, options = {}) {
       eligible: rankedTorrents.length,
       targetScan: effectiveTargetScan,
       source,
+      mode: sourceType,
       stale,
       warning,
       cacheAgeSeconds: state?.scanned_at ? Math.round((Date.now() - state.scanned_at) / 1000) : null
@@ -582,8 +1301,8 @@ async function findDownloadLinkForApiKey(id, env, apiKey, userId = "") {
   const baseUrl = envValue(env, "C411_API_URL", "https://c411.org/api");
   if (hasD1(env)) {
     const row = await env.DB.prepare(
-      "SELECT torrent_key FROM torrent_cache WHERE torrent_key = ? AND user_id = ? LIMIT 1"
-    ).bind(id, userId).first();
+      "SELECT torrent_key FROM torrent_cache WHERE torrent_key = ? AND user_id = ? UNION SELECT torrent_key FROM rss_score_hits WHERE torrent_key = ? AND user_id = ? AND keep_until >= ? LIMIT 1"
+    ).bind(id, userId, id, userId, Date.now()).first();
     if (row?.torrent_key) return buildC411DownloadLink(baseUrl, apiKey, id);
     return "";
   }
@@ -671,9 +1390,25 @@ async function handleRequest(request, env) {
       return json(await ranked(url, env, { publicView: true, apiKey: sessionAuth.apiKey, userId: sessionAuth.userId }));
     }
 
+    if (url.pathname === "/api/watchlist" && request.method === "GET") {
+      if (!sessionValid) return json({ error: "Authentification requise" }, 401);
+      return json(await watchlistPayload(env, sessionAuth?.userId || ""));
+    }
+
+    if (url.pathname === "/api/watchlist" && request.method === "POST") {
+      if (!sessionValid) return json({ error: "Authentification requise" }, 401);
+      const payload = await request.json();
+      return json(await upsertWatchlistRule(env, sessionAuth?.userId || "", payload));
+    }
+
+    if (url.pathname === "/api/torrent-history") {
+      if (!sessionValid) return json({ error: "Authentification requise" }, 401);
+      return json(await torrentHistoryPayload(env, sessionAuth?.userId || "", url.searchParams.get("id")));
+    }
+
     if (url.pathname === "/rss") {
       if (!rssAuth) return new Response("RSS token invalide", { status: 401 });
-      const data = await ranked(url, env, { apiKey: rssAuth.apiKey, userId: rssAuth.userId });
+      const data = await ranked(url, env, { apiKey: rssAuth.apiKey, userId: rssAuth.userId, source: "rss", cacheOnly: true });
       return new Response(buildRss(data.torrents, url.toString()), {
         headers: { "content-type": "application/rss+xml; charset=utf-8" }
       });
@@ -713,5 +1448,8 @@ async function handleRequest(request, env) {
 }
 
 export default {
-  fetch: handleRequest
+  fetch: handleRequest,
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(warmCronScans(env));
+  }
 };

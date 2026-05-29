@@ -100,6 +100,11 @@ export function parseTorznab(xml) {
     const itemXml = match[0];
     const enclosure = itemXml.match(/<enclosure\b[^>]*>/i)?.[0] ?? "";
     const size = textBetween(itemXml, "size") || attrValue(enclosure, "length");
+    const seedersAttr = extractTorznabAttr(itemXml, "seeders");
+    const leechersAttr = extractTorznabAttr(itemXml, "leechers");
+    const peersAttr = extractTorznabAttr(itemXml, "peers");
+    const seeders = Number(seedersAttr || 0);
+    const peers = Number(peersAttr || 0);
 
     return {
       title: textBetween(itemXml, "title"),
@@ -107,8 +112,8 @@ export function parseTorznab(xml) {
       guid: textBetween(itemXml, "guid") || attrValue(enclosure, "url") || textBetween(itemXml, "link"),
       pubDate: textBetween(itemXml, "pubDate"),
       category: textBetween(itemXml, "category"),
-      seeders: Number(extractTorznabAttr(itemXml, "seeders") || extractTorznabAttr(itemXml, "grabs") || 0),
-      leechers: Number(extractTorznabAttr(itemXml, "leechers") || extractTorznabAttr(itemXml, "peers") || 0),
+      seeders,
+      leechers: leechersAttr ? Number(leechersAttr) : Math.max(peers >= seeders ? peers - seeders : peers, 0),
       grabs: Number(extractTorznabAttr(itemXml, "grabs") || 0),
       infohash: extractTorznabAttr(itemXml, "infohash"),
       uploadVolumeFactor: Number(extractTorznabAttr(itemXml, "uploadvolumefactor") || 1),

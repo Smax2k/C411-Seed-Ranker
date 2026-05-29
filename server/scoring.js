@@ -11,15 +11,19 @@ export function scoreTorrent(torrent, filters) {
   const ageHours = torrent.pubDate
     ? Math.max((Date.now() - new Date(torrent.pubDate).getTime()) / 36e5, 0)
     : 72;
+  const ageMinutes = ageHours * 60;
 
   const demand = Math.log1p(leechers) * 28;
   const scarcity = 46 / Math.sqrt(seeders + 1);
   const pressure = (leechers / Math.max(seeders, 1)) * 30;
   const freshness = Math.max(0, 18 - Math.log1p(ageHours) * 4);
+  const earlyVelocity = ageMinutes <= 120
+    ? Math.min(480, pressure * (30 / Math.max(ageMinutes, 5)))
+    : 0;
   const sizeFit = sizeGb <= filters.maxSizeGb ? 12 : Math.max(0, 12 - (sizeGb - filters.maxSizeGb) * 1.8);
   const saturationPenalty = seeders > filters.maxSeeders ? (seeders - filters.maxSeeders) * 1.4 : 0;
 
-  return Math.max(0, demand + scarcity + pressure + freshness + sizeFit - saturationPenalty);
+  return Math.max(0, demand + scarcity + pressure + freshness + earlyVelocity + sizeFit + toNumber(torrent.dynamicScoreBonus) + toNumber(torrent.watchlistScoreBonus) - saturationPenalty);
 }
 
 function torrentAgeHours(torrent) {
