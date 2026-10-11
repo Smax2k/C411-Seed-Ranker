@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Check, Copy, Download, GitFork, History, Info, LogOut, Pencil, Plus, Radar, Save, X } from "lucide-react";
 import "./styles.css";
+import AutomaticDownloads from "./AutomaticDownloads.jsx";
+import { ATTEMPTS_KEY, readStored } from "./automaticDownloads.js";
 
 const defaultFilters = {
   q: "",
@@ -73,7 +75,13 @@ function App() {
   const [editingRadar, setEditingRadar] = useState(null);
   const [downloaded, setDownloaded] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem("downloadedTorrents") || "{}");
+      const current = readStored("downloadedTorrents", {});
+      if (localStorage.getItem("c411DownloadTrackingMigrated") === "1") return current;
+      const attempts = readStored(ATTEMPTS_KEY, {});
+      const merged = { ...attempts, ...current };
+      if (Object.keys(attempts).length) localStorage.setItem("downloadedTorrents", JSON.stringify(merged));
+      localStorage.setItem("c411DownloadTrackingMigrated", "1");
+      return merged;
     } catch {
       return {};
     }
@@ -153,9 +161,9 @@ function App() {
     });
   }
 
-  function handleDownload(torrent) {
+  const handleDownload = useCallback((torrent) => {
     setDownloadedState(torrentKey(torrent), true);
-  }
+  }, []);
 
   async function load({ fresh = false } = {}) {
     setStatus("Analyse des torrents...");
@@ -574,6 +582,8 @@ function App() {
           <input type="number" min="1" max="200" value={filters.maxResults} onChange={(event) => updateFilter("maxResults", event.target.value)} />
         </label>
       </section>
+
+      <AutomaticDownloads torrents={data.torrents} downloaded={downloaded} downloadBaseUrl={downloadBaseUrl?.toString()} autoRefresh={autoRefresh} onDownload={handleDownload} />
 
       <section className="rssBox compactRss">
         <span>RSS qBittorrent</span>

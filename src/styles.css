@@ -797,3 +797,9 @@ th {
     font-size: 0;
   }
 }
+/* Automatisation locale : préférences et historique propres au navigateur. */
+.automaticDownloads { margin: 16px 0; padding: 20px; }
+.automaticDownloadControls { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; }
+.automaticDownloadControls > label:not(.switchControl) { display: grid; gap: 8px; }
+.automaticDownloadControls input[type="number"] { max-width: 200px; }
+.automaticDownloads p { line-height: 1.5; font-size: 13px; opacity: .8; }
